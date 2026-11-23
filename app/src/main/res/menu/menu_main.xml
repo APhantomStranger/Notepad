@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/action_font_size"
+        android:title="Change font size"
+        app:showAsAction="never"/>
+
+    <item
+        android:id="@+id/action_delete_sheet"
+        android:title="Delete sheet"
+        app:showAsAction="never"/>
+
+    <item
+        android:id="@+id/action_change_color"
+        android:title="Change color of sheet"
+        app:showAsAction="never"/>
+
+</menu>
