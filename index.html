@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<!--
+  Notes — a minimal tabbed notepad. Installable web app (PWA).
+  Version 2.0.0
+
+  Changelog
+  2.0.0  Rebuilt as an installable web app (replaces the 1.x Android APK).
+         Tabs with +, menu: font size / delete sheet / sheet color,
+         save on every keystroke, offline via service worker.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#2E7D32">
+<meta name="description" content="A clean, simple tabbed notepad. Saves every keystroke.">
+<title>Notes</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<style>
+  :root {
+    --bar: #2E7D32;
+    --bar-dark: #1B5E20;
+    --on-bar: #ffffff;
+    --sheet-bg: #ffffff;
+    --sheet-fg: #000000;
+    --font: 18px;
+  }
+  body.theme-black { --sheet-bg: #121212; --sheet-fg: #ffffff; }
+  body.theme-lime  { --sheet-bg: #DDF3B8; --sheet-fg: #000000; }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    height: 100vh; height: 100dvh;
+    background: var(--sheet-bg); color: var(--sheet-fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+
+  /* ---- top bar: tabs, +, menu ---- */
+  header {
+    flex: none; display: flex; align-items: stretch;
+    background: var(--bar); color: var(--on-bar);
+    padding-top: env(safe-area-inset-top);
+    box-shadow: 0 1px 3px rgba(0,0,0,.25);
+    position: relative; z-index: 2;
+  }
+  #tabs {
+    flex: 1; display: flex; overflow-x: auto; scrollbar-width: none;
+    min-width: 0;
+  }
+  #tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex: none; max-width: 11em; padding: 0 14px; height: 48px;
+    border: 0; background: none; color: rgba(255,255,255,.72);
+    font-weight: 500; font-size: 15px; line-height: 48px; font-family: inherit;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-bottom: 3px solid transparent; cursor: pointer;
+  }
+  .tab.on { color: #fff; border-bottom-color: #fff; }
+  .icon-btn {
+    flex: none; width: 48px; height: 48px; border: 0; background: none;
+    color: var(--on-bar); font-size: 26px; line-height: 48px; cursor: pointer;
+    border-radius: 50%;
+  }
+  .icon-btn:active { background: rgba(255,255,255,.16); }
+  .icon-btn svg { width: 24px; height: 24px; vertical-align: middle; fill: currentColor; }
+
+  /* ---- the sheet ---- */
+  main { flex: 1; position: relative; min-height: 0; }
+  textarea.sheet {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    border: 0; outline: 0; resize: none; margin: 0;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    background: var(--sheet-bg); color: var(--sheet-fg); caret-color: var(--sheet-fg);
+    font: var(--font)/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: none;
+  }
+  textarea.sheet.on { display: block; }
+  textarea.sheet::placeholder { color: var(--sheet-fg); opacity: .45; }
+
+  /* ---- overflow menu ---- */
+  #menu {
+    position: absolute; right: 6px; top: calc(env(safe-area-inset-top) + 44px);
+    min-width: 230px; background: #fff; color: #1d1d1d; border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.28); padding: 6px 0; z-index: 10;
+  }
+  #menu[hidden] { display: none; }
+  #menu button {
+    display: block; width: 100%; text-align: left; border: 0; background: none;
+    padding: 0 18px; height: 48px; font-size: 16px; line-height: 48px; font-family: inherit;
+    color: inherit; cursor: pointer;
+  }
+  #menu button:active { background: #eee; }
+  #menu button[hidden] { display: none; }
+  #menu .ver { padding: 8px 18px 4px; font-size: 12px; color: #888; border-top: 1px solid #eee; margin-top: 4px; }
+
+  /* ---- dialogs ---- */
+  #scrim {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 20;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  #scrim[hidden] { display: none; }
+  .dialog {
+    background: #fff; color: #1d1d1d; border-radius: 14px; width: 100%; max-width: 360px;
+    padding: 20px 8px 8px; box-shadow: 0 10px 40px rgba(0,0,0,.35);
+  }
+  .dialog h2 { margin: 0 16px 8px; font-size: 19px; font-weight: 600; }
+  .dialog p { margin: 0 16px 12px; font-size: 15px; line-height: 1.45; color: #444; }
+  .opt {
+    display: flex; align-items: center; gap: 14px; width: 100%; height: 50px;
+    padding: 0 16px; border: 0; background: none; font-size: 16px; font-family: inherit;
+    color: inherit; text-align: left; cursor: pointer; border-radius: 8px;
+  }
+  .opt:active { background: #f0f0f0; }
+  .radio {
+    width: 20px; height: 20px; border-radius: 50%; border: 2px solid #777; flex: none;
+    display: grid; place-items: center;
+  }
+  .opt.on .radio { border-color: var(--bar); }
+  .opt.on .radio::after { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--bar); }
+  .swatch { width: 26px; height: 26px; border-radius: 6px; border: 1px solid #999; flex: none;
+            display: grid; place-items: center; font-size: 13px; font-weight: 700; }
+  .actions { display: flex; justify-content: flex-end; gap: 4px; padding: 8px 8px 0; }
+  .actions button {
+    border: 0; background: none; color: var(--bar); font-weight: 600; font-size: 15px; font-family: inherit;
+    padding: 10px 14px; border-radius: 8px; cursor: pointer; letter-spacing: .02em;
+  }
+  .actions button:active { background: #eef5ee; }
+  .actions button.danger { color: #c62828; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
+    transform: translateX(-50%); background: #323232; color: #fff; padding: 12px 18px;
+    border-radius: 8px; font-size: 14px; z-index: 30; max-width: 90vw;
+  }
+  #toast[hidden] { display: none; }
+</style>
+</head>
+<body class="theme-white">
+
+<header>
+  <nav id="tabs" role="tablist" aria-label="Sheets"></nav>
+  <button id="btnAdd" class="icon-btn" aria-label="New sheet" title="New sheet">
+    <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+  </button>
+  <button id="btnMenu" class="icon-btn" aria-label="Menu" aria-haspopup="true" title="Menu">
+    <svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+  </button>
+  <div id="menu" role="menu" hidden>
+    <button id="mFont" role="menuitem">Change font size</button>
+    <button id="mDelete" role="menuitem">Delete sheet</button>
+    <button id="mColor" role="menuitem">Change color of sheet</button>
+    <button id="mInstall" role="menuitem" hidden>Install app</button>
+    <div class="ver">Notes v<span id="ver"></span></div>
+  </div>
+</header>
+
+<main id="sheets"></main>
+
+<div id="scrim" hidden><div class="dialog" id="dialog" role="dialog" aria-modal="true"></div></div>
+<div id="toast" role="status" hidden></div>
+
+<script>
+'use strict';
+const VERSION = '2.0.0';
+
+/* ============================================================
+   Storage — localStorage, written synchronously on every edit,
+   so text survives the app being swiped away or killed.
+   ============================================================ */
+const META_KEY = 'notes.meta';
+const SHEET_KEY = function (id) { return 'notes.sheet.' + id; };
+
+const FONT_SIZES = [
+  { label: 'Small', px: 14 },
+  { label: 'Medium', px: 18 },
+  { label: 'Large', px: 22 },
+  { label: 'Extra large', px: 28 }
+];
+const THEMES = [
+  { id: 'white', label: 'White (default)', bg: '#ffffff', fg: '#000000' },
+  { id: 'black', label: 'Black', bg: '#121212', fg: '#ffffff' },
+  { id: 'lime',  label: 'Lime pastel green', bg: '#DDF3B8', fg: '#000000' }
+];
+const DEFAULT_FONT = 18;
+
+let meta = { order: [], active: null, font: DEFAULT_FONT, theme: 'white' };
+let saveWarned = false;
+
+function store(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    saveWarned = false;
+    return true;
+  } catch (e) {
+    if (!saveWarned) { toast('Couldn’t save — your phone’s storage is full.'); saveWarned = true; }
+    return false;
+  }
+}
+function load(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function unstore(key) { try { localStorage.removeItem(key); } catch (e) {} }
+function saveMeta() { store(META_KEY, JSON.stringify(meta)); }
+
+function newId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+/* Read storage first; only create a fresh sheet when nothing usable exists. */
+function loadState() {
+  let m = null;
+  try { m = JSON.parse(load(META_KEY) || 'null'); } catch (e) { m = null; }
+  meta = { order: [], active: null, font: DEFAULT_FONT, theme: 'white' };
+  if (m && Array.isArray(m.order)) {
+    meta.order = m.order.filter(function (id) { return typeof id === 'string' && id; });
+    meta.active = m.active;
+    if (FONT_SIZES.some(function (f) { return f.px === m.font; })) meta.font = m.font;
+    if (THEMES.some(function (t) { return t.id === m.theme; })) meta.theme = m.theme;
+  }
+  if (!meta.order.length) {
+    const id = newId();
+    meta.order.push(id);
+    store(SHEET_KEY(id), '');
+  }
+  if (meta.order.indexOf(meta.active) === -1) meta.active = meta.order[0];
+  saveMeta();
+}
+
+/* ============================================================
+   Rendering
+   ============================================================ */
+const tabsEl = document.getElementById('tabs');
+const sheetsEl = document.getElementById('sheets');
+const areas = {};   // id -> textarea (one per sheet, so each keeps its own undo history)
+
+function titleOf(text) {
+  const line = (text || '').split('\n').map(function (s) { return s.trim(); })
+    .find(function (s) { return s.length > 0; });
+  if (!line) return 'Untitled';
+  return line.length > 22 ? line.slice(0, 22) + '…' : line;
+}
+
+function makeArea(id) {
+  const ta = document.createElement('textarea');
+  ta.className = 'sheet';
+  ta.dataset.id = id;
+  ta.placeholder = 'Start typing…';
+  ta.setAttribute('aria-label', 'Note');
+  ta.spellcheck = true;
+  ta.setAttribute('autocapitalize', 'sentences');
+  ta.value = load(SHEET_KEY(id)) || '';
+  ta.addEventListener('input', function () {
+    store(SHEET_KEY(id), ta.value);          // save on every keystroke
+    const tab = tabsEl.querySelector('.tab[data-id="' + id + '"]');
+    if (tab) tab.textContent = titleOf(ta.value);
+  });
+  areas[id] = ta;
+  sheetsEl.appendChild(ta);
+  return ta;
+}
+
+function renderAll() {
+  // textareas: create missing, remove deleted
+  meta.order.forEach(function (id) { if (!areas[id]) makeArea(id); });
+  Object.keys(areas).forEach(function (id) {
+    if (meta.order.indexOf(id) === -1) { areas[id].remove(); delete areas[id]; }
+  });
+  // tabs
+  tabsEl.textContent = '';
+  meta.order.forEach(function (id) {
+    const b = document.createElement('button');
+    b.className = 'tab' + (id === meta.active ? ' on' : '');
+    b.dataset.id = id;
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', id === meta.active ? 'true' : 'false');
+    b.textContent = titleOf(areas[id].value);
+    b.addEventListener('click', function () { activate(id); });
+    tabsEl.appendChild(b);
+  });
+  Object.keys(areas).forEach(function (id) { areas[id].classList.toggle('on', id === meta.active); });
+  applyLook();
+  const on = tabsEl.querySelector('.tab.on');
+  if (on && on.scrollIntoView) on.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+}
+
+function applyLook() {
+  document.body.classList.remove('theme-white', 'theme-black', 'theme-lime');
+  document.body.classList.add('theme-' + meta.theme);
+  document.documentElement.style.setProperty('--font', meta.font + 'px');
+}
+
+function activate(id, focus) {
+  if (meta.order.indexOf(id) === -1) return;
+  meta.active = id;
+  saveMeta();
+  renderAll();
+  if (focus) areas[id].focus();
+}
+
+/* ============================================================
+   Actions
+   ============================================================ */
+function addSheet() {
+  const id = newId();
+  store(SHEET_KEY(id), '');
+  meta.order.push(id);
+  activate(id, true);
+}
+
+function deleteActive() {
+  const id = meta.active;
+  const i = meta.order.indexOf(id);
+  meta.order.splice(i, 1);
+  unstore(SHEET_KEY(id));
+  if (!meta.order.length) {               // never leave zero sheets
+    const fresh = newId();
+    store(SHEET_KEY(fresh), '');
+    meta.order.push(fresh);
+  }
+  meta.active = meta.order[Math.min(i, meta.order.length - 1)] || meta.order[0];
+  saveMeta();
+  renderAll();
+}
+
+/* ---- menu ---- */
+const menu = document.getElementById('menu');
+function openMenu() { menu.hidden = false; }
+function closeMenu() { menu.hidden = true; }
+document.getElementById('btnMenu').addEventListener('click', function (e) {
+  e.stopPropagation();
+  menu.hidden ? openMenu() : closeMenu();
+});
+document.addEventListener('click', function (e) {
+  if (!menu.hidden && !menu.contains(e.target)) closeMenu();
+});
+document.getElementById('btnAdd').addEventListener('click', addSheet);
+document.getElementById('ver').textContent = VERSION;
+
+/* ---- dialogs ---- */
+const scrim = document.getElementById('scrim');
+const dialog = document.getElementById('dialog');
+function closeDialog() { scrim.hidden = true; dialog.textContent = ''; }
+scrim.addEventListener('click', function (e) { if (e.target === scrim) closeDialog(); });
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') { closeMenu(); if (!scrim.hidden) closeDialog(); }
+});
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+function choiceDialog(title, items, isOn, onPick, decorate) {
+  dialog.textContent = '';
+  dialog.appendChild(el('h2', null, title));
+  items.forEach(function (it) {
+    const b = el('button', 'opt' + (isOn(it) ? ' on' : ''));
+    b.appendChild(el('span', 'radio'));
+    if (decorate) b.appendChild(decorate(it));
+    b.appendChild(el('span', null, it.label));
+    b.addEventListener('click', function () { onPick(it); closeDialog(); });
+    dialog.appendChild(b);
+  });
+  const acts = el('div', 'actions');
+  const cancel = el('button', null, 'Cancel');
+  cancel.addEventListener('click', closeDialog);
+  acts.appendChild(cancel);
+  dialog.appendChild(acts);
+  scrim.hidden = false;
+}
+
+document.getElementById('mFont').addEventListener('click', function () {
+  closeMenu();
+  choiceDialog('Font size', FONT_SIZES,
+    function (f) { return f.px === meta.font; },
+    function (f) { meta.font = f.px; saveMeta(); applyLook(); });
+});
+
+document.getElementById('mColor').addEventListener('click', function () {
+  closeMenu();
+  choiceDialog('Sheet color', THEMES,
+    function (t) { return t.id === meta.theme; },
+    function (t) { meta.theme = t.id; saveMeta(); applyLook(); },
+    function (t) {
+      const s = el('span', 'swatch', 'Aa');
+      s.style.background = t.bg; s.style.color = t.fg;
+      return s;
+    });
+});
+
+document.getElementById('mDelete').addEventListener('click', function () {
+  closeMenu();
+  const name = titleOf(areas[meta.active].value);
+  dialog.textContent = '';
+  dialog.appendChild(el('h2', null, 'Delete sheet'));
+  dialog.appendChild(el('p', null, 'Delete “' + name + '”? This can’t be undone.'));
+  const acts = el('div', 'actions');
+  const cancel = el('button', null, 'Cancel');
+  const del = el('button', 'danger', 'Delete');
+  del.id = 'confirmDelete';
+  cancel.addEventListener('click', closeDialog);
+  del.addEventListener('click', function () { deleteActive(); closeDialog(); });
+  acts.appendChild(cancel); acts.appendChild(del);
+  dialog.appendChild(acts);
+  scrim.hidden = false;
+});
+
+/* ---- toast ---- */
+let toastTimer = null;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.hidden = true; }, 4000);
+}
+
+/* ---- another window of the app changed storage: pick it up ---- */
+window.addEventListener('storage', function (e) {
+  if (!e.key || e.key.indexOf('notes.') !== 0) return;
+  const editing = document.activeElement && document.activeElement.classList.contains('sheet');
+  if (e.key === META_KEY) {
+    if (!editing) { loadState(); renderAll(); }
+    return;
+  }
+  const id = e.key.slice('notes.sheet.'.length);
+  if (areas[id] && document.activeElement !== areas[id] && e.newValue != null) {
+    areas[id].value = e.newValue;
+    const tab = tabsEl.querySelector('.tab[data-id="' + id + '"]');
+    if (tab) tab.textContent = titleOf(e.newValue);
+  }
+});
+
+/* ---- install prompt (only when the browser offers it) ---- */
+let deferredInstall = null;
+const mInstall = document.getElementById('mInstall');
+window.addEventListener('beforeinstallprompt', function (e) {
+  e.preventDefault(); deferredInstall = e; mInstall.hidden = false;
+});
+mInstall.addEventListener('click', function () {
+  closeMenu();
+  if (!deferredInstall) return;
+  deferredInstall.prompt();
+  deferredInstall.userChoice.finally(function () { deferredInstall = null; mInstall.hidden = true; });
+});
+window.addEventListener('appinstalled', function () { mInstall.hidden = true; });
+
+/* ============================================================
+   Boot — read storage before anything that could overwrite it
+   ============================================================ */
+loadState();
+renderAll();
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+try {
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
+  }
+} catch (e) {}
+</script>
+</body>
+</html>

@@ -1,117 +1,74 @@
-# Notes — a minimal Android notepad
+# Notes
 
-![Build APK](https://github.com/APhantomStranger/Notepad/actions/workflows/build.yml/badge.svg)
+A clean, simple tabbed notepad, modeled on Windows Notepad. Installs from the
+browser as its own app: no APK, no app store.
 
-**Current version: 1.0.1**
+**Current version: 2.0.0**
 
-A clean, single-page-per-tab writing app modeled on Windows 11 Notepad.
+**Open it:** https://aphantomstranger.github.io/Notepad/
 
-## Install on your phone (easiest)
+## Install on your phone
 
-1. On your phone, open the [latest release](https://github.com/APhantomStranger/Notepad/releases/latest).
-2. Download `Notes-vX.Y.Z.apk` and tap it. Allow "Install unknown apps" for
-   your browser if asked.
-3. Future releases install right over the top — your notes are kept, because
-   every release is signed with the same key.
+1. Open the link above in Chrome on your Android phone.
+2. Tap ⋮ (Chrome's menu) → **Install app**, or open Notes' own ⋮ menu and tap
+   **Install app**.
+3. Notes appears on your home screen with the pencil icon and opens full
+   screen, like any other app. It works offline.
 
-## Releasing a new version
-
-1. Bump `versionCode` and `versionName` in `app/build.gradle`.
-2. Commit, then tag and push: `git tag v1.0.2 && git push origin main --tags`.
-3. GitHub Actions builds the signed APK and attaches it to a new release.
-
-### About signing
-
-APKs are signed with `app/ci-debug.keystore`, a fixed key committed to the
-repo on purpose (password `android`). It is **not secret** — its only job is
-to keep the signature identical across builds so updates install over the
-existing app without wiping your notes.
-
-To switch to a private key later, add these repo secrets under
-Settings → Secrets and variables → Actions: `SIGNING_KEYSTORE_BASE64`
-(base64 of your .jks), `SIGNING_STORE_PASSWORD`, `SIGNING_KEY_ALIAS`,
-`SIGNING_KEY_PASSWORD`. Note: changing keys means uninstalling once
-(back up your notes first), since Android won't update across signatures.
+Updates arrive on their own: the next time you open the app online, it picks up
+the latest version. Your notes are never touched by an update.
 
 ## Features
 
-- One writing page per tab, with a **+** button in the top bar to add more.
-- Overflow menu (⋮) with:
-  - **Change font size** — Small / Medium (default) / Large / Extra large.
-  - **Delete sheet** — removes the currently open sheet (with confirmation).
-  - **Change color of sheet** — White (default) / Black / Lime pastel green.
-- **Auto-save on every keystroke.** Content is written to `SharedPreferences`
-  via `apply()`, which flushes to disk asynchronously but is guaranteed to
-  complete before the process is killed. Extra saves fire on `onPause()` /
-  `onDestroyView()` as a safety net.
-- Standard Android text-selection: copy, cut, paste all work out of the box.
-- Adaptive launcher icon: a diagonal pencil (yellow body, red eraser,
-  black graphite tip) on a pale off-white background.
+- One full-page sheet per tab; **+** opens a new sheet. Tabs are named after
+  each sheet's first line.
+- ⋮ menu:
+  - **Change font size**: Small, Medium (default), Large, Extra large
+  - **Delete sheet**: removes the open sheet, after asking
+  - **Change color of sheet**: White with black text (default), Black with
+    white text, or Lime pastel green with black text
+- Saves on every keystroke. Notes survive the app being swiped away, the phone
+  restarting, and going offline.
+- Normal copy, cut and paste, to and from other apps.
 
-## Project layout
+## Where notes are stored
 
-```
-Notepad/
-├── settings.gradle              # Root Gradle settings
-├── build.gradle                 # Root project build script
-├── gradle.properties            # Gradle/JVM options
-├── README.md                    # You are here
-└── app/
-    ├── build.gradle             # App module build script
-    ├── proguard-rules.pro
-    └── src/main/
-        ├── AndroidManifest.xml
-        ├── java/com/example/notepad/
-        │   ├── MainActivity.kt       # Toolbar, tabs, + button, menu handlers
-        │   ├── NoteFragment.kt       # Single-sheet editor + auto-save
-        │   ├── NotesPagerAdapter.kt  # ViewPager2 adapter
-        │   └── NotesRepository.kt    # SharedPreferences persistence
-        └── res/
-            ├── drawable/             # + icon, pencil vector
-            ├── layout/               # activity_main, fragment_note
-            ├── menu/                 # Overflow menu
-            ├── mipmap-*/             # Launcher icons (all densities)
-            ├── values/               # strings, colors, themes
-            └── xml/                  # Backup rules
-```
+On the phone, in the browser's storage for this site (`localStorage`). Nothing
+is sent anywhere. Uninstalling the app, or clearing Chrome's site data for
+`aphantomstranger.github.io`, deletes your notes.
 
-## Build & install on your phone
+## What's in the repo
 
-You'll need **Android Studio** (Ladybug or newer works fine). Free download:
-https://developer.android.com/studio
+| Path | What it is |
+| --- | --- |
+| `index.html` | the whole app: markup, styles and script |
+| `manifest.webmanifest` | app name, icon and colors that make it installable |
+| `sw.js` | service worker: offline cache of the app files |
+| `icons/` | pencil icon at 192, 512, apple-touch and favicon sizes |
+| `tests/e2e.js` | browser test suite |
 
-1. **Open the project.** File → Open → point at the `Notepad/` folder.
-2. **Let Gradle sync.** First sync will download the Gradle wrapper, the
-   Android build tools, and the dependencies listed in `app/build.gradle`.
-   This takes a few minutes on first run.
-3. **Enable USB debugging on your phone.**
-   Settings → About phone → tap "Build number" 7 times → back out to
-   Settings → System → Developer options → toggle **USB debugging** on.
-4. **Plug in your phone** with a USB cable. Accept the "Allow USB debugging?"
-   prompt on the device.
-5. **Run.** Click the green ▶ Run button in Android Studio, pick your phone
-   from the deployment target dropdown, and hit OK. Android Studio will
-   build the APK, install it, and launch it.
+Hosted by GitHub Pages from the root of `main`.
 
-### If you'd rather sideload an APK
+## Releasing a change
 
-After a successful build, the debug APK lives at:
+1. Edit `index.html`.
+2. Bump the version in all three places: `VERSION` in `index.html` (plus its
+   changelog comment), `CACHE` in `sw.js`, and the line at the top of this
+   README. Changing `CACHE` is what makes installed copies drop the old files.
+3. Run the tests, then push to `main`. Pages redeploys within a minute or two.
 
-```
-app/build/outputs/apk/debug/app-debug.apk
+## Testing
+
+```sh
+npm i playwright-core
+CHROME=/path/to/chrome node tests/e2e.js
 ```
 
-Copy that to your phone, tap it in a file manager, and confirm "Install from
-unknown sources". No signing setup required for a debug build.
+44 checks: every-keystroke saving, survival of a killed app and a full browser
+restart, tabs, copy/paste, every menu option, install readiness, offline load,
+and no page errors.
 
-## Notes on the design
+## History
 
-- **Why SharedPreferences and not Room?** Notes are just strings keyed by a
-  sheet UUID; there's no relational structure worth a database. Prefs are
-  fast, transactional, and survive `kill -9`.
-- **Why `apply()` and not `commit()`?** `apply()` writes on a background
-  thread and won't stutter the UI while you type. Android holds the write
-  lock across process death, so nothing is lost.
-- **Kotlin 1.9 + AGP 8.2 + minSdk 24 + targetSdk 34.** Runs on Android 7.0
-  and up. If your phone is older than that, lower `minSdk` in
-  `app/build.gradle`.
+Versions 1.x were a native Android app (Kotlin). That project is preserved in the
+`v1.0.1` tag and release.
