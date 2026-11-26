@@ -3,7 +3,7 @@
 A clean, simple tabbed notepad, modeled on Windows Notepad. Installs from the
 browser as its own app: no APK, no app store.
 
-**Current version: 2.0.0**
+**Current version: 2.1.0**
 
 **Open it:** https://aphantomstranger.github.io/Notepad/
 
@@ -27,13 +27,24 @@ the latest version. Your notes are never touched by an update.
   - **Delete sheet**: removes the open sheet, after asking
   - **Change color of sheet**: White with black text (default), Black with
     white text, or Lime pastel green with black text
+- **Drawing sheets** for handwritten notes: tap the pen button in the top bar.
+  - Three pens: super fine, regular, wide. With a pressure-sensitive stylus,
+    pressing harder draws a little thicker.
+  - **Invert** (half-circle button) flips between dark ink on a light page and
+    light ink on a dark page, per drawing.
+  - The page never runs out: scroll past your last line and keep writing.
+  - A stylus draws and your finger scrolls, so a resting palm won't leave marks.
+    Until the app has seen a stylus, one finger draws and two fingers scroll.
+  - Ink saves the moment you lift the pen. Delete sheet and Change color of
+    sheet work the same as on text sheets.
 - Saves on every keystroke. Notes survive the app being swiped away, the phone
   restarting, and going offline.
 - Normal copy, cut and paste, to and from other apps.
 
 ## Where notes are stored
 
-On the phone, in the browser's storage for this site (`localStorage`). Nothing
+On the phone, in the browser's storage for this site: text in `localStorage`,
+drawings in IndexedDB (one record per stroke). Nothing
 is sent anywhere. Uninstalling the app, or clearing Chrome's site data for
 `aphantomstranger.github.io`, deletes your notes.
 
@@ -64,9 +75,10 @@ npm i playwright-core
 CHROME=/path/to/chrome node tests/e2e.js
 ```
 
-44 checks: every-keystroke saving, survival of a killed app and a full browser
-restart, tabs, copy/paste, every menu option, install readiness, offline load,
-and no page errors.
+87 checks: every-keystroke saving, survival of a killed app and a full browser
+restart, tabs, copy/paste, every menu option, drawing (measured ink width per pen,
+stylus vs finger vs palm, endless scrolling, invert, colors, saving), install
+readiness, offline load, and no page errors.
 
 ## History
 

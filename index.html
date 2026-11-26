@@ -1,9 +1,13 @@
 <!DOCTYPE html>
 <!--
   Notes — a minimal tabbed notepad. Installable web app (PWA).
-  Version 2.0.0
+  Version 2.1.0
 
   Changelog
+  2.1.0  Drawing sheets: pen button opens a blank page to hand-write on.
+         Super fine / regular / wide pens, invert (white ink on black),
+         endless page that grows as you scroll and write. Ink saves the
+         moment the pen lifts.
   2.0.0  Rebuilt as an installable web app (replaces the 1.x Android APK).
          Tabs with +, menu: font size / delete sheet / sheet color,
          save on every keystroke, offline via service worker.
@@ -82,6 +86,33 @@
   textarea.sheet.on { display: block; }
   textarea.sheet::placeholder { color: var(--sheet-fg); opacity: .45; }
 
+  /* ---- drawing sheet ---- */
+  .drawing {
+    position: absolute; inset: 0; display: none; overflow: hidden;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  .drawing.on { display: block; }
+  .drawing canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .dbar {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: calc(14px + env(safe-area-inset-bottom));
+    display: flex; align-items: center; gap: 2px; padding: 4px;
+    background: #fff; border-radius: 28px; box-shadow: 0 3px 14px rgba(0,0,0,.3);
+  }
+  .dbar button {
+    width: 46px; height: 46px; border: 0; background: none; border-radius: 50%;
+    display: grid; place-items: center; color: #333; cursor: pointer; padding: 0;
+  }
+  .dbar button.on { background: #dcedc8; color: var(--bar-dark); }
+  .dbar button svg { width: 24px; height: 24px; fill: currentColor; }
+  .dbar .dot { display: block; border-radius: 50%; background: currentColor; }
+  .dbar .sep { width: 1px; height: 28px; background: #ddd; margin: 0 4px; }
+  .sbar {
+    position: absolute; right: 3px; top: 0; width: 4px; border-radius: 2px;
+    background: rgba(128,128,128,.65); opacity: 0; transition: opacity .4s; pointer-events: none;
+  }
+  .sbar.show { opacity: 1; transition: none; }
+
   /* ---- overflow menu ---- */
   #menu {
     position: absolute; right: 6px; top: calc(env(safe-area-inset-top) + 44px);
@@ -147,6 +178,9 @@
   <button id="btnAdd" class="icon-btn" aria-label="New sheet" title="New sheet">
     <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
   </button>
+  <button id="btnDraw" class="icon-btn" aria-label="New drawing" title="New drawing">
+    <svg viewBox="0 0 24 24"><path d="M18.85 10.39l1.06-1.06c.78-.78.78-2.05 0-2.83L18.5 5.09c-.78-.78-2.05-.78-2.83 0l-1.06 1.06 4.24 4.24zm-5.66-2.83L4 16.76V21h4.24l9.19-9.19-4.24-4.25zM19 17.5c0 2.19-2.54 3.5-5 3.5-.55 0-1-.45-1-1s.45-1 1-1c1.54 0 3-.73 3-1.5 0-.47-.48-.87-1.23-1.2l1.48-1.48c1.07.63 1.75 1.47 1.75 2.68zM4.58 13.35C3.61 12.79 3 12.06 3 11c0-1.8 1.89-2.63 3.56-3.36C7.59 7.18 9 6.56 9 6c0-.41-.78-1-2-1-1.26 0-1.8.61-1.83.64-.35.41-.98.46-1.4.12-.41-.34-.49-.95-.15-1.38C3.73 4.24 4.76 3 7 3s4 1.32 4 3c0 1.87-1.93 2.72-3.64 3.47C6.42 9.88 5 10.5 5 11c0 .31.43.6 1.07.86l-1.49 1.49z"/></svg>
+  </button>
   <button id="btnMenu" class="icon-btn" aria-label="Menu" aria-haspopup="true" title="Menu">
     <svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
   </button>
@@ -166,7 +200,7 @@
 
 <script>
 'use strict';
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 
 /* ============================================================
    Storage — localStorage, written synchronously on every edit,
@@ -188,7 +222,7 @@ const THEMES = [
 ];
 const DEFAULT_FONT = 18;
 
-let meta = { order: [], active: null, font: DEFAULT_FONT, theme: 'white' };
+let meta = { order: [], active: null, font: DEFAULT_FONT, theme: 'white', types: {}, inv: {}, pen: 'regular' };
 let saveWarned = false;
 
 function store(key, value) {
@@ -213,12 +247,17 @@ function newId() {
 function loadState() {
   let m = null;
   try { m = JSON.parse(load(META_KEY) || 'null'); } catch (e) { m = null; }
-  meta = { order: [], active: null, font: DEFAULT_FONT, theme: 'white' };
+  meta = { order: [], active: null, font: DEFAULT_FONT, theme: 'white', types: {}, inv: {}, pen: 'regular' };
   if (m && Array.isArray(m.order)) {
     meta.order = m.order.filter(function (id) { return typeof id === 'string' && id; });
     meta.active = m.active;
     if (FONT_SIZES.some(function (f) { return f.px === m.font; })) meta.font = m.font;
     if (THEMES.some(function (t) { return t.id === m.theme; })) meta.theme = m.theme;
+    meta.order.forEach(function (id) {
+      if (m.types && m.types[id] === 'draw') meta.types[id] = 'draw';
+      if (m.inv && m.inv[id] === true) meta.inv[id] = true;
+    });
+    if (PENS.some(function (pn) { return pn.id === m.pen; })) meta.pen = m.pen;
   }
   if (!meta.order.length) {
     const id = newId();
@@ -263,10 +302,16 @@ function makeArea(id) {
 }
 
 function renderAll() {
-  // textareas: create missing, remove deleted
-  meta.order.forEach(function (id) { if (!areas[id]) makeArea(id); });
+  // sheets: create missing, remove deleted (text = textarea, drawing = canvas page)
+  meta.order.forEach(function (id) {
+    if (isDrawing(id)) { if (!drawings[id]) drawings[id] = new Drawing(id); }
+    else if (!areas[id]) makeArea(id);
+  });
   Object.keys(areas).forEach(function (id) {
-    if (meta.order.indexOf(id) === -1) { areas[id].remove(); delete areas[id]; }
+    if (meta.order.indexOf(id) === -1 || isDrawing(id)) { areas[id].remove(); delete areas[id]; }
+  });
+  Object.keys(drawings).forEach(function (id) {
+    if (meta.order.indexOf(id) === -1 || !isDrawing(id)) { drawings[id].el.remove(); delete drawings[id]; }
   });
   // tabs
   tabsEl.textContent = '';
@@ -276,11 +321,13 @@ function renderAll() {
     b.dataset.id = id;
     b.setAttribute('role', 'tab');
     b.setAttribute('aria-selected', id === meta.active ? 'true' : 'false');
-    b.textContent = titleOf(areas[id].value);
+    b.textContent = labelOf(id);
     b.addEventListener('click', function () { activate(id); });
     tabsEl.appendChild(b);
   });
   Object.keys(areas).forEach(function (id) { areas[id].classList.toggle('on', id === meta.active); });
+  Object.keys(drawings).forEach(function (id) { drawings[id].el.classList.toggle('on', id === meta.active); });
+  if (drawings[meta.active]) drawings[meta.active].show();
   applyLook();
   const on = tabsEl.querySelector('.tab.on');
   if (on && on.scrollIntoView) on.scrollIntoView({ inline: 'nearest', block: 'nearest' });
@@ -290,6 +337,7 @@ function applyLook() {
   document.body.classList.remove('theme-white', 'theme-black', 'theme-lime');
   document.body.classList.add('theme-' + meta.theme);
   document.documentElement.style.setProperty('--font', meta.font + 'px');
+  if (drawings[meta.active]) drawings[meta.active].render();
 }
 
 function activate(id, focus) {
@@ -297,8 +345,407 @@ function activate(id, focus) {
   meta.active = id;
   saveMeta();
   renderAll();
-  if (focus) areas[id].focus();
+  if (isDrawing(id)) {
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  } else if (focus) areas[id].focus();
 }
+
+/* ============================================================
+   Drawing sheets — freehand ink on an endless page.
+   Each stroke is saved to IndexedDB the moment the pen lifts
+   (ink would quickly outgrow localStorage).
+   Input: a stylus draws and fingers scroll. Until a stylus has
+   been seen on this device, one finger draws and two scroll.
+   ============================================================ */
+const PENS = [
+  { id: 'fine',    label: 'Super fine pen', px: 1.5, dot: 4 },
+  { id: 'regular', label: 'Regular pen',    px: 3,   dot: 8 },
+  { id: 'wide',    label: 'Wide pen',       px: 8,   dot: 15 }
+];
+const INVERTED = {                        // per theme: what "invert" swaps to
+  white: { bg: '#121212', ink: '#ffffff' },
+  black: { bg: '#ffffff', ink: '#000000' },
+  lime:  { bg: '#121212', ink: '#DDF3B8' }
+};
+const drawings = {};                      // id -> Drawing
+let penSeen = load('notes.penSeen') === '1';
+let seqCounter = 0;
+
+function isDrawing(id) { return meta.types[id] === 'draw'; }
+
+function labelOf(id) {
+  if (!isDrawing(id)) return titleOf(areas[id] ? areas[id].value : load(SHEET_KEY(id)));
+  const n = meta.order.filter(isDrawing).indexOf(id) + 1;
+  return '✎ Drawing ' + n;
+}
+
+function inkColors(id) {
+  const t = THEMES.find(function (x) { return x.id === meta.theme; }) || THEMES[0];
+  return meta.inv[id] ? INVERTED[t.id] : { bg: t.bg, ink: t.fg };
+}
+
+/* ---- IndexedDB: one record per stroke, key [sheet, seq] ---- */
+let dbPromise = null;
+function openDb() {
+  if (!dbPromise) dbPromise = new Promise(function (resolve, reject) {
+    const r = indexedDB.open('notes-db', 1);
+    r.onupgradeneeded = function () { r.result.createObjectStore('strokes', { keyPath: ['sheet', 'seq'] }); };
+    r.onsuccess = function () { resolve(r.result); };
+    r.onerror = function () { reject(r.error); };
+  });
+  return dbPromise;
+}
+function strokesTx(mode, work) {
+  return openDb().then(function (d) {
+    return new Promise(function (resolve, reject) {
+      const tx = d.transaction('strokes', mode);
+      const req = work(tx.objectStore('strokes'));
+      tx.oncomplete = function () { resolve(req ? req.result : undefined); };
+      tx.onerror = tx.onabort = function () { reject(tx.error); };
+    });
+  });
+}
+function sheetRange(id) { return IDBKeyRange.bound([id, -Infinity], [id, Infinity]); }
+
+function withBounds(s) {
+  const p = s.pts;
+  s.minX = s.minY = Infinity; s.maxX = s.maxY = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    const r = p[i + 2] / 2;
+    if (p[i] - r < s.minX) s.minX = p[i] - r;
+    if (p[i] + r > s.maxX) s.maxX = p[i] + r;
+    if (p[i + 1] - r < s.minY) s.minY = p[i + 1] - r;
+    if (p[i + 1] + r > s.maxY) s.maxY = p[i + 1] + r;
+  }
+  return s;
+}
+
+/* Smooth ink: quadratic curves through the midpoints of the sampled points.
+   Piece i (1..n-1) runs mid(P[i-1],P[i]) -> mid(P[i],P[i+1]) bending at P[i];
+   the closing piece is a short line to the last point, painted when the pen lifts.
+   Drawing live and repainting later use exactly these pieces, so ink never shifts. */
+function drawPieces(c, p, count, from, to, final) {
+  const n = count - 1;
+  if (n < 0) return;
+  if (n === 0) {
+    if (final) { c.beginPath(); c.arc(p[0], p[1], p[2] / 2, 0, 2 * Math.PI); c.fill(); }
+    return;
+  }
+  // consecutive pieces of the same width go in ONE path, so their soft edges don't double up
+  let open = false, w = -1;
+  function begin(i, width) {
+    if (open) c.stroke();
+    c.lineWidth = w = width;
+    c.beginPath();
+    const a = (i - 1) * 3, b = i * 3;
+    if (i === 1) c.moveTo(p[0], p[1]); else c.moveTo((p[a] + p[b]) / 2, (p[a + 1] + p[b + 1]) / 2);
+    open = true;
+  }
+  const last = Math.min(to, n - 1);
+  for (let i = Math.max(1, from); i <= last; i++) {
+    const b = i * 3, d = (i + 1) * 3;
+    if (!open || p[b + 2] !== w) begin(i, p[b + 2]);
+    c.quadraticCurveTo(p[b], p[b + 1], (p[b] + p[d]) / 2, (p[b + 1] + p[d + 1]) / 2);
+  }
+  if (final) {
+    const b = n * 3;
+    if (!open || p[b + 2] !== w) begin(n, p[b + 2]);
+    c.lineTo(p[b], p[b + 1]);
+  }
+  if (open) c.stroke();
+}
+
+function Drawing(id) {
+  const self = this;
+  this.id = id;
+  this.strokes = [];       // saved strokes, oldest first
+  this.bottom = 0;         // lowest ink on the page
+  this.scrollY = 0;
+  this.cur = null;         // stroke being drawn
+  this.penId = null;       // pointer drawing it
+  this.touches = new Map(); // scrolling fingers: pointerId -> {y, t}
+  this.ignore = new Set();  // palm/finger pointers to ignore until they lift
+  this.vel = 0; this.flingRaf = 0; this.raf = 0; this.sbarTimer = 0;
+  this.w = 0; this.h = 0; this.dpr = 1;
+
+  this.el = el('div', 'drawing');
+  this.el.dataset.id = id;
+  this.canvas = document.createElement('canvas');
+  this.canvas.setAttribute('aria-label', 'Drawing');
+  this.ctx = this.canvas.getContext('2d');
+  this.sbar = el('div', 'sbar');
+  this.bar = el('div', 'dbar');
+  PENS.forEach(function (pn) {
+    const b = el('button');
+    b.dataset.pen = pn.id; b.title = pn.label; b.setAttribute('aria-label', pn.label);
+    const dot = el('span', 'dot');
+    dot.style.width = dot.style.height = pn.dot + 'px';
+    b.appendChild(dot);
+    b.addEventListener('click', function () { meta.pen = pn.id; saveMeta(); self.syncBar(); });
+    self.bar.appendChild(b);
+  });
+  this.bar.appendChild(el('span', 'sep'));
+  const inv = el('button');
+  inv.dataset.invert = '1'; inv.title = 'Invert colors'; inv.setAttribute('aria-label', 'Invert colors');
+  inv.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18V4a8 8 0 0 1 0 16z"/></svg>';
+  inv.addEventListener('click', function () { self.toggleInvert(); });
+  this.bar.appendChild(inv);
+  this.el.appendChild(this.canvas);
+  this.el.appendChild(this.sbar);
+  this.el.appendChild(this.bar);
+  sheetsEl.appendChild(this.el);
+
+  const c = this.canvas;
+  c.addEventListener('pointerdown', function (e) { self.down(e); });
+  c.addEventListener('pointermove', function (e) { self.move(e); });
+  c.addEventListener('pointerup', function (e) { self.up(e); });
+  c.addEventListener('pointercancel', function (e) { self.up(e); });
+  c.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  this.el.addEventListener('wheel', function (e) {   // whole page, toolbar included
+    e.preventDefault();
+    self.stopFling();
+    self.scrollTo(self.scrollY + (e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY));
+  }, { passive: false });
+  if (window.ResizeObserver) new ResizeObserver(function () { self.resize(); }).observe(this.el);
+  else window.addEventListener('resize', function () { self.resize(); });
+  this.syncBar();
+  this.load();
+}
+
+Drawing.prototype.load = function () {
+  const self = this;
+  strokesTx('readonly', function (st) { return st.getAll(sheetRange(self.id)); }).then(function (rows) {
+    const saved = (rows || []).map(function (r) {
+      return withBounds({ sheet: r.sheet, seq: r.seq, size: r.size, pts: r.pts });
+    });
+    self.strokes = saved.concat(self.strokes).sort(function (a, b) { return a.seq - b.seq; });
+    self.bottom = self.strokes.reduce(function (m, s) { return Math.max(m, s.maxY); }, 0);
+    self.el.dataset.strokes = String(self.strokes.length);
+    self.el.dataset.loaded = '1';
+    self.render();
+  }).catch(function () {
+    self.el.dataset.loaded = '1';
+    toast('Couldn’t open this drawing’s saved ink.');
+  });
+};
+
+Drawing.prototype.wipe = function () {
+  const id = this.id;
+  strokesTx('readwrite', function (st) { st.delete(sheetRange(id)); }).catch(function () {});
+};
+
+Drawing.prototype.show = function () {
+  const self = this;
+  this.syncBar();
+  requestAnimationFrame(function () { self.resize(); });
+};
+
+Drawing.prototype.resize = function () {
+  const w = this.el.clientWidth, h = this.el.clientHeight;
+  if (!w || !h) return;
+  this.w = w; this.h = h; this.dpr = window.devicePixelRatio || 1;
+  this.canvas.width = Math.round(w * this.dpr);
+  this.canvas.height = Math.round(h * this.dpr);
+  this.scrollY = Math.min(this.scrollY, this.maxScroll());
+  this.render();
+};
+
+/* The page never runs out: you can always scroll two screens past the lowest ink,
+   and writing down there pushes the end further. */
+Drawing.prototype.maxScroll = function () {
+  const b = Math.max(this.bottom, this.cur ? this.cur.maxY : 0);
+  return Math.max(0, b) + 2 * this.h;
+};
+
+Drawing.prototype.scrollTo = function (y) {
+  const ny = Math.max(0, Math.min(y, this.maxScroll()));
+  if (ny === this.scrollY) return;
+  this.scrollY = ny;
+  this.el.dataset.scroll = String(Math.round(ny));
+  this.flashBar();
+  this.schedule();
+};
+
+Drawing.prototype.schedule = function () {
+  const self = this;
+  if (!this.raf) this.raf = requestAnimationFrame(function () { self.raf = 0; self.render(); });
+};
+
+Drawing.prototype.prep = function (ink) {
+  const c = this.ctx;
+  c.setTransform(this.dpr, 0, 0, this.dpr, 0, -this.scrollY * this.dpr);
+  c.strokeStyle = c.fillStyle = ink;
+  c.lineCap = c.lineJoin = 'round';
+};
+
+Drawing.prototype.render = function () {
+  if (!this.w || !this.el.classList.contains('on')) return;
+  const c = this.ctx, col = inkColors(this.id);
+  c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  c.fillStyle = col.bg;
+  c.fillRect(0, 0, this.w, this.h);
+  this.prep(col.ink);
+  const top = this.scrollY - 20, bot = this.scrollY + this.h + 20;
+  for (let i = 0; i < this.strokes.length; i++) {
+    const s = this.strokes[i];
+    if (s.maxY >= top && s.minY <= bot) drawPieces(c, s.pts, s.pts.length / 3, 1, Infinity, true);
+  }
+  if (this.cur) drawPieces(c, this.cur.pts, this.cur.pts.length / 3, 1, Infinity, false);
+  const max = this.maxScroll(), bh = Math.max(28, this.h * this.h / (max + this.h));
+  this.sbar.style.height = bh + 'px';
+  this.sbar.style.top = ((this.h - bh) * (max ? this.scrollY / max : 0)) + 'px';
+};
+
+Drawing.prototype.flashBar = function () {
+  const sb = this.sbar;
+  sb.classList.add('show');
+  clearTimeout(this.sbarTimer);
+  this.sbarTimer = setTimeout(function () { sb.classList.remove('show'); }, 700);
+};
+
+Drawing.prototype.syncBar = function () {
+  const inv = !!meta.inv[this.id];
+  this.bar.querySelectorAll('button[data-pen]').forEach(function (b) {
+    b.classList.toggle('on', b.dataset.pen === meta.pen);
+    b.setAttribute('aria-pressed', b.dataset.pen === meta.pen ? 'true' : 'false');
+  });
+  const ib = this.bar.querySelector('button[data-invert]');
+  ib.classList.toggle('on', inv);
+  ib.setAttribute('aria-pressed', inv ? 'true' : 'false');
+};
+
+Drawing.prototype.toggleInvert = function () {
+  if (meta.inv[this.id]) delete meta.inv[this.id]; else meta.inv[this.id] = true;
+  saveMeta();
+  this.syncBar();
+  this.render();
+};
+
+/* ---- input ---- */
+Drawing.prototype.down = function (e) {
+  if (e.pointerType === 'pen' && !penSeen) { penSeen = true; store('notes.penSeen', '1'); }
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  this.stopFling();
+  try { this.canvas.setPointerCapture(e.pointerId); } catch (x) {}
+  if (e.pointerType === 'touch') {
+    if (this.cur && this.curType !== 'touch') { this.ignore.add(e.pointerId); return; }   // palm while the pen writes
+    this.touches.set(e.pointerId, { y: e.clientY, t: e.timeStamp });
+    if (penSeen || this.touches.size > 1) {
+      if (this.cur) this.cancelStroke();     // that first finger was starting a scroll, not a line
+      return;
+    }
+  } else if (this.touches.size) {            // pen lands while a hand rests on the glass: the pen wins
+    const ign = this.ignore;
+    this.touches.forEach(function (v, k) { ign.add(k); });
+    this.touches.clear();
+  }
+  if (this.cur) return;
+  this.begin(e);
+};
+
+Drawing.prototype.move = function (e) {
+  if (this.ignore.has(e.pointerId)) return;
+  if (this.cur && e.pointerId === this.penId) {
+    const list = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
+    const evs = list.length ? list : [e];
+    for (let i = 0; i < evs.length; i++) this.addPoint(evs[i]);
+    this.drawLive();
+    return;
+  }
+  const t = this.touches.get(e.pointerId);
+  if (!t || this.cur) return;
+  const dy = e.clientY - t.y, dt = Math.max(1, e.timeStamp - t.t);
+  t.y = e.clientY; t.t = e.timeStamp;
+  const step = -dy / this.touches.size;
+  this.vel = 0.6 * this.vel + 0.4 * (step * this.touches.size / dt);
+  this.scrollTo(this.scrollY + step);
+};
+
+Drawing.prototype.up = function (e) {
+  if (this.ignore.delete(e.pointerId)) return;
+  if (this.cur && e.pointerId === this.penId) {
+    if (e.type === 'pointerup') this.move(e);   // keep the very last sample
+    this.finishStroke();
+  }
+  if (this.touches.delete(e.pointerId) && !this.touches.size && !this.cur) this.fling();
+};
+
+Drawing.prototype.begin = function (e) {
+  const pen = PENS.find(function (pn) { return pn.id === meta.pen; }) || PENS[1];
+  this.rect = this.canvas.getBoundingClientRect();
+  this.penId = e.pointerId;
+  this.curType = e.pointerType;
+  this.cur = { sheet: this.id, seq: Date.now() * 1000 + (seqCounter++ % 1000), size: pen.px, pts: [],
+               minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  this.drawn = 0;                            // curve pieces already painted
+  this.addPoint(e);
+};
+
+Drawing.prototype.addPoint = function (ev) {
+  const s = this.cur, p = s.pts, n = p.length;
+  const x = ev.clientX - this.rect.left, y = ev.clientY - this.rect.top + this.scrollY;
+  if (n) {
+    const dx = x - p[n - 3], dy = y - p[n - 2];
+    if (dx * dx + dy * dy < 0.5) return;
+  }
+  let w = s.size;
+  if (this.curType === 'pen' && ev.pressure > 0) w = s.size * (0.55 + 0.9 * ev.pressure);
+  w = Math.round(w * 4) / 4;
+  p.push(Math.round(x * 10) / 10, Math.round(y * 10) / 10, w);
+  const r = w / 2;
+  if (x - r < s.minX) s.minX = x - r;
+  if (x + r > s.maxX) s.maxX = x + r;
+  if (y - r < s.minY) s.minY = y - r;
+  if (y + r > s.maxY) s.maxY = y + r;
+};
+
+Drawing.prototype.drawLive = function () {
+  const count = this.cur.pts.length / 3, to = count - 2;
+  if (to < 1 || to <= this.drawn) return;
+  this.prep(inkColors(this.id).ink);
+  drawPieces(this.ctx, this.cur.pts, count, this.drawn + 1, to, false);
+  this.drawn = to;
+};
+
+Drawing.prototype.finishStroke = function () {
+  const s = this.cur;
+  this.cur = null; this.penId = null;
+  this.prep(inkColors(this.id).ink);
+  drawPieces(this.ctx, s.pts, s.pts.length / 3, this.drawn + 1, Infinity, true);
+  s.pts = new Float32Array(s.pts);
+  this.strokes.push(s);
+  this.bottom = Math.max(this.bottom, s.maxY);
+  this.el.dataset.strokes = String(this.strokes.length);
+  this.render();
+  strokesTx('readwrite', function (st) { st.put({ sheet: s.sheet, seq: s.seq, size: s.size, pts: s.pts }); })
+    .catch(function () { toast('Couldn’t save that stroke — your phone’s storage may be full.'); });
+};
+
+Drawing.prototype.cancelStroke = function () {
+  this.cur = null; this.penId = null;
+  this.render();
+};
+
+Drawing.prototype.fling = function () {
+  const self = this;
+  let v = this.vel * 16;                     // px per frame
+  this.vel = 0;
+  if (Math.abs(v) < 2) return;
+  const step = function () {
+    const before = self.scrollY;
+    self.scrollTo(self.scrollY + v);
+    v *= 0.94;
+    if (Math.abs(v) < 0.5 || self.scrollY === before) { self.flingRaf = 0; return; }
+    self.flingRaf = requestAnimationFrame(step);
+  };
+  this.flingRaf = requestAnimationFrame(step);
+};
+
+Drawing.prototype.stopFling = function () {
+  if (this.flingRaf) cancelAnimationFrame(this.flingRaf);
+  this.flingRaf = 0; this.vel = 0;
+};
 
 /* ============================================================
    Actions
@@ -310,11 +757,21 @@ function addSheet() {
   activate(id, true);
 }
 
+function addDrawing() {
+  const id = newId();
+  meta.types[id] = 'draw';
+  meta.order.push(id);
+  activate(id);
+}
+
 function deleteActive() {
   const id = meta.active;
   const i = meta.order.indexOf(id);
   meta.order.splice(i, 1);
-  unstore(SHEET_KEY(id));
+  if (isDrawing(id)) {
+    if (drawings[id]) drawings[id].wipe();
+    delete meta.types[id]; delete meta.inv[id];
+  } else unstore(SHEET_KEY(id));
   if (!meta.order.length) {               // never leave zero sheets
     const fresh = newId();
     store(SHEET_KEY(fresh), '');
@@ -327,7 +784,10 @@ function deleteActive() {
 
 /* ---- menu ---- */
 const menu = document.getElementById('menu');
-function openMenu() { menu.hidden = false; }
+function openMenu() {
+  document.getElementById('mFont').hidden = isDrawing(meta.active);   // no text on a drawing
+  menu.hidden = false;
+}
 function closeMenu() { menu.hidden = true; }
 document.getElementById('btnMenu').addEventListener('click', function (e) {
   e.stopPropagation();
@@ -337,6 +797,7 @@ document.addEventListener('click', function (e) {
   if (!menu.hidden && !menu.contains(e.target)) closeMenu();
 });
 document.getElementById('btnAdd').addEventListener('click', addSheet);
+document.getElementById('btnDraw').addEventListener('click', addDrawing);
 document.getElementById('ver').textContent = VERSION;
 
 /* ---- dialogs ---- */
@@ -395,7 +856,7 @@ document.getElementById('mColor').addEventListener('click', function () {
 
 document.getElementById('mDelete').addEventListener('click', function () {
   closeMenu();
-  const name = titleOf(areas[meta.active].value);
+  const name = labelOf(meta.active);
   dialog.textContent = '';
   dialog.appendChild(el('h2', null, 'Delete sheet'));
   dialog.appendChild(el('p', null, 'Delete “' + name + '”? This can’t be undone.'));
