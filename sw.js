@@ -1,6 +1,6 @@
-/* Notes service worker v2.1.0 — offline cache for the app shell.
+/* Notes service worker v2.2.0 — offline cache for the app shell.
    Notes themselves live in localStorage, never in this cache. */
-const CACHE = 'notes-pwa-2.1.0';
+const CACHE = 'notes-pwa-2.2.0';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
                'icons/apple-touch-icon.png', 'icons/favicon-32.png'];
 

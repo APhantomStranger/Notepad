@@ -149,7 +149,7 @@ function check(name, ok, detail) {
   await sleep(100);
   check('Install app hides again after the prompt', !(await p.isVisible('#mInstall')));
   await p.click('#btnMenu');
-  check('menu shows version 2.1.0', (await p.textContent('#menu .ver')).trim() === 'Notes v2.1.0');
+  check('menu shows version 2.2.0', (await p.textContent('#menu .ver')).trim() === 'Notes v2.2.0');
   await p.click('main', { position: { x: 200, y: 600 } });
   check('tapping outside closes the menu', await p.$eval('#menu', m => m.hidden));
 
@@ -213,20 +213,23 @@ function check(name, ok, detail) {
     const b = await canvasBox();
     await p.mouse.move(b.x + x0, b.y + y0); await p.mouse.down();
     await p.mouse.move(b.x + x1, b.y + y1, { steps: 20 }); await p.mouse.up();
-    await frame();
+    await sleep(140); await frame();          // line is held ~100ms in case the contact blipped
   };
   // synthetic pointers (pen / touch) on the open drawing's canvas
   const ptr = (type, o) => p.$eval(D + ' canvas', (c, [type, o]) => {
     const r = c.getBoundingClientRect();
     c.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, isPrimary: !!o.primary,
       pointerId: o.id, pointerType: o.type, pressure: o.pressure == null ? (type === 'pointerup' ? 0 : 0.5) : o.pressure,
-      button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: r.left + o.x, clientY: r.top + o.y }));
+      width: o.w || 1, height: o.w || 1,
+      button: o.button == null ? 0 : o.button, buttons: type === 'pointerup' ? 0 : (o.buttons || 1),
+      clientX: r.left + o.x, clientY: r.top + o.y }));
   }, [type, o]);
-  const ptrLine = async (type, id, x0, y0, x1, y1, pressure) => {
-    await ptr('pointerdown', { id, type, x: x0, y: y0, pressure, primary: true });
-    for (let i = 1; i <= 20; i++) await ptr('pointermove', { id, type, x: x0 + (x1 - x0) * i / 20, y: y0 + (y1 - y0) * i / 20, pressure });
-    await ptr('pointerup', { id, type, x: x1, y: y1 });
-    await frame();
+  const ptrLine = async (type, id, x0, y0, x1, y1, pressure, extra) => {
+    const o = Object.assign({ id, type, pressure }, extra || {});
+    await ptr('pointerdown', Object.assign({}, o, { x: x0, y: y0, primary: true }));
+    for (let i = 1; i <= 20; i++) await ptr('pointermove', Object.assign({}, o, { x: x0 + (x1 - x0) * i / 20, y: y0 + (y1 - y0) * i / 20 }));
+    await ptr('pointerup', Object.assign({}, o, { x: x1, y: y1 }));
+    await sleep(140); await frame();
   };
 
   const textTabs = (await tabs()).length;
@@ -237,8 +240,9 @@ function check(name, ok, detail) {
   check('pen button opens a new drawing tab', (await tabs()).length === textTabs + 1 && (await tabs())[textTabs] === '✎ Drawing 1', await tabs());
   check('drawing page shows instead of a text box', !(await p.isVisible(activeArea)) && await p.isVisible(D + ' canvas'));
   check('no keyboard focus on a drawing', await p.evaluate(() => !document.activeElement || document.activeElement.tagName !== 'TEXTAREA'));
-  check('toolbar: super fine, regular, wide, invert',
-    JSON.stringify(await p.$$eval(D + ' .dbar button', b => b.map(x => x.getAttribute('aria-label')))) === JSON.stringify(['Super fine pen', 'Regular pen', 'Wide pen', 'Invert colors']));
+  check('toolbar: super fine, regular, wide, eraser, undo, invert',
+    JSON.stringify(await p.$$eval(D + ' .dbar button', b => b.map(x => x.getAttribute('aria-label')))) === JSON.stringify(['Super fine pen', 'Regular pen', 'Wide pen', 'Eraser', 'Undo', 'Invert colors']));
+  check('undo is greyed out on a blank drawing', await p.$eval(D + ' .dbar button[data-undo]', b => b.disabled));
   check('regular pen selected by default', await p.$eval(D + ' .dbar button[data-pen="regular"]', b => b.classList.contains('on')));
   check('blank page is white', (await pixel(200, 300)) === 'rgb(255, 255, 255)');
 
@@ -253,13 +257,55 @@ function check(name, ok, detail) {
   check('wide ink is ~8px', tWide > 6.8 && tWide < 9.2, tWide);
   check('ink is black on white', (await pixel(200, 220)) === 'rgb(0, 0, 0)', await pixel(200, 220));
   check('each stroke saved', (await dstate()).strokes === 3 && (await idbCount(drawId)) === 3, [await dstate(), await idbCount(drawId)]);
+
+  // eraser: drag across all three lines
+  await p.click(D + ' .dbar button[data-eraser]');
+  check('eraser on, pens off', await p.$eval(D + ' .dbar', b => b.querySelector('[data-eraser]').classList.contains('on') && !b.querySelector('[data-pen].on')));
+  await mouseLine(200, 70, 200, 250);
+  check('eraser removes every line it touches', (await dstate()).strokes === 0 && (await idbCount(drawId)) === 0, [await dstate(), await idbCount(drawId)]);
+  check('erased ink is gone from the page', (await pixel(200, 100)) === 'rgb(255, 255, 255)' && (await pixel(200, 220)) === 'rgb(255, 255, 255)');
+  await p.click(D + ' .dbar button[data-undo]'); await sleep(100); await frame();
+  check('undo brings erased lines back (and saves them)', (await dstate()).strokes === 3 && (await idbCount(drawId)) === 3 && (await pixel(200, 220)) === 'rgb(0, 0, 0)');
+  await p.click(D + ' .dbar button[data-eraser]');
+  check('tapping eraser again goes back to the pen', await p.$eval(D + ' .dbar button[data-pen="wide"]', b => b.classList.contains('on')));
+  await p.click(D + ' .dbar button[data-eraser]');
+  await mouseLine(120, 70, 120, 120);              // only crosses the super fine line
+  check('eraser only takes lines it touches', (await dstate()).strokes === 2 && (await pixel(200, 160)) === 'rgb(0, 0, 0)');
   await p.click(D + ' .dbar button[data-pen="regular"]');
+  check('picking a pen turns the eraser off', !(await p.$eval(D + ' .dbar button[data-eraser]', b => b.classList.contains('on'))));
+  await p.click(D + ' .dbar button[data-undo]'); await sleep(100);
+  await mouseLine(60, 40, 340, 40);
+  check('new line drawn', (await dstate()).strokes === 4);
+  await p.click(D + ' .dbar button[data-undo]'); await sleep(100); await frame();
+  check('undo takes back the last line', (await dstate()).strokes === 3 && (await idbCount(drawId)) === 3 && (await pixel(200, 40)) === 'rgb(255, 255, 255)');
+  await ptrLine('pen', 71, 200, 60, 200, 250, 0.5, { buttons: 32, button: 5 });
+  check('the stylus\u2019s eraser end erases', (await dstate()).strokes === 0);
+  await p.click(D + ' .dbar button[data-undo]'); await sleep(100); await frame();
+  check('and undo restores it', (await dstate()).strokes === 3 && (await idbCount(drawId)) === 3);
+  await p.evaluate(() => localStorage.removeItem('notes.penSeen'));
+  await p.evaluate(() => { penSeen = false; });
 
   // finger input before any stylus has been seen: one finger draws, two fingers scroll
   check('no stylus seen yet', await p.evaluate(() => localStorage.getItem('notes.penSeen')) === null);
+  let before;
   await ptrLine('touch', 11, 60, 300, 300, 300);
   check('one finger draws (no stylus yet)', (await dstate()).strokes === 4 && (await pixel(180, 300)) === 'rgb(0, 0, 0)');
-  let before = await dstate();
+  before = await dstate();
+  await ptrLine('touch', 12, 60, 330, 300, 330, 0.5, { w: 90 });
+  check('a palm-sized contact is ignored', (await dstate()).strokes === before.strokes && (await dstate()).scroll === before.scroll);
+  await ptr('pointerdown', { id: 13, type: 'touch', x: 60, y: 350, primary: true });
+  for (let i = 1; i <= 5; i++) await ptr('pointermove', { id: 13, type: 'touch', x: 60 + i * 10, y: 350 });
+  await sleep(250);                                  // a hand comes to rest mid-line
+  await ptr('pointerdown', { id: 14, type: 'touch', x: 300, y: 700 });
+  for (let i = 6; i <= 20; i++) {
+    await ptr('pointermove', { id: 13, type: 'touch', x: 60 + i * 10, y: 350 });
+    await ptr('pointermove', { id: 14, type: 'touch', x: 300, y: 700 - i * 5 });
+  }
+  await ptr('pointerup', { id: 14, type: 'touch', x: 300, y: 600 });
+  await ptr('pointerup', { id: 13, type: 'touch', x: 260, y: 350 });
+  await sleep(140); await frame();
+  check('a resting hand doesn\u2019t cancel the line or scroll', (await dstate()).strokes === before.strokes + 1 && (await dstate()).scroll === 0 && (await pixel(230, 350)) === 'rgb(0, 0, 0)');
+  before = await dstate();
   await ptr('pointerdown', { id: 21, type: 'touch', x: 150, y: 600, primary: true });
   await ptr('pointermove', { id: 21, type: 'touch', x: 150, y: 590 });
   await ptr('pointerdown', { id: 22, type: 'touch', x: 250, y: 600 });
@@ -277,17 +323,43 @@ function check(name, ok, detail) {
   check('mouse wheel scrolls back to the top', (await dstate()).scroll === 0);
 
   // a real stylus: draws with pressure, and from then on a finger scrolls
+  before = await dstate();
   await ptrLine('pen', 31, 60, 400, 300, 400, 0.9);
-  check('stylus draws', (await dstate()).strokes === 5 && (await pixel(180, 400)) === 'rgb(0, 0, 0)');
+  check('stylus draws', (await dstate()).strokes === before.strokes + 1 && (await pixel(180, 400)) === 'rgb(0, 0, 0)');
   check('stylus is remembered', await p.evaluate(() => localStorage.getItem('notes.penSeen')) === '1');
   const tPress = await thickness(180, 385, 415);
-  check('pressing harder draws thicker (regular, pressure .9)', tPress > 3.6 && tPress < 4.9, tPress);
+  check('line width stays even whatever the pressure (no blotches)', tPress > 2.4 && tPress < 3.8, tPress);
+  before = await dstate();
+  // contact blips for a moment mid-line: still one continuous line
+  await ptr('pointerdown', { id: 81, type: 'pen', x: 60, y: 440, primary: true });
+  for (let i = 1; i <= 10; i++) await ptr('pointermove', { id: 81, type: 'pen', x: 60 + i * 10, y: 440 });
+  await ptr('pointerup', { id: 81, type: 'pen', x: 160, y: 440 });
+  await ptr('pointerdown', { id: 82, type: 'pen', x: 175, y: 440, primary: true });
+  for (let i = 1; i <= 10; i++) await ptr('pointermove', { id: 82, type: 'pen', x: 175 + i * 10, y: 440 });
+  await ptr('pointerup', { id: 82, type: 'pen', x: 275, y: 440 });
+  await sleep(140); await frame();
+  check('a split-second contact drop keeps one continuous line', (await dstate()).strokes === before.strokes + 1 && (await pixel(168, 440)) === 'rgb(0, 0, 0)', [await dstate(), await pixel(168, 440)]);
+  before = await dstate();
+  await ptrLine('pen', 83, 60, 470, 150, 470, 0.5);
+  await sleep(200);
+  await ptrLine('pen', 84, 160, 470, 250, 470, 0.5);
+  check('a real pen lift (pause) starts a new line', (await dstate()).strokes === before.strokes + 2 && (await pixel(155, 470)) === 'rgb(255, 255, 255)');
+  before = await dstate();
+  await ptr('pointerdown', { id: 85, type: 'pen', x: 60, y: 490, primary: true });
+  await ptr('pointermove', { id: 85, type: 'pen', x: 100, y: 490 });
+  await ptr('pointerup', { id: 85, type: 'pen', x: 100, y: 490 });
+  await ptr('pointerdown', { id: 86, type: 'pen', x: 200, y: 490, primary: true });
+  await ptr('pointermove', { id: 86, type: 'pen', x: 240, y: 490 });
+  await ptr('pointerup', { id: 86, type: 'pen', x: 240, y: 490 });
+  await sleep(140); await frame();
+  check('a quick touch somewhere else is a separate mark', (await dstate()).strokes === before.strokes + 2 && (await pixel(150, 490)) === 'rgb(255, 255, 255)');
   before = await dstate();
   await ptrLine('touch', 41, 200, 700, 200, 500);
   await sleep(400);
   ds = await dstate();
   check('after a stylus, one finger scrolls instead of drawing', ds.strokes === before.strokes && ds.scroll > 100, ds);
   await p.mouse.wheel(0, -5000); await sleep(100); await frame();
+  before = await dstate();
   // palm resting while the stylus writes
   await ptr('pointerdown', { id: 51, type: 'pen', x: 60, y: 460, pressure: 0.5, primary: true });
   await ptr('pointerdown', { id: 52, type: 'touch', x: 300, y: 800 });
@@ -299,7 +371,7 @@ function check(name, ok, detail) {
   await ptr('pointerup', { id: 52, type: 'touch', x: 300, y: 650 });
   await sleep(300); await frame();
   ds = await dstate();
-  check('palm on the screen is ignored while the stylus writes', ds.strokes === 6 && ds.scroll === 0, ds);
+  check('palm on the screen is ignored while the stylus writes', ds.strokes === before.strokes + 1 && ds.scroll === 0, ds);
 
   // endless page: scroll to the end, write there, and the end moves further down
   const h = ds.h;
@@ -365,6 +437,7 @@ function check(name, ok, detail) {
   // tabs and delete
   await p.click('#btnDraw'); await p.waitForSelector(D + '[data-loaded="1"]');
   const draw2 = (await dstate()).id;
+  check('undo greyed out on the new drawing', await p.$eval(D + ' .dbar button[data-undo]', b => b.disabled));
   check('second drawing is "Drawing 2" and starts blank', (await tabs()).slice(-1)[0] === '✎ Drawing 2' && (await dstate()).strokes === 0 && (await pixel(200, 220)) === 'rgb(255, 255, 255)');
   await mouseLine(60, 100, 300, 100);
   await p.click('.tab >> nth=' + textTabs);
@@ -396,6 +469,17 @@ function check(name, ok, detail) {
   await p.reload(); await p.waitForSelector(activeArea);
   check('app loads offline with notes', (await p.inputValue(activeArea)) === 'offline test');
   await ctx.setOffline(false);
+
+  console.log('Pen test page');
+  await p.goto(URL + 'pentest.html'); await p.waitForSelector('#c');
+  {
+    const b = await (await p.$('#c')).boundingBox();
+    await p.mouse.move(b.x + 50, b.y + 100); await p.mouse.down();
+    await p.mouse.move(b.x + 300, b.y + 140, { steps: 25 }); await p.mouse.up();
+    await frame();
+    const st = await p.textContent('#stats');
+    check('pen test page records contacts and samples', /Contacts: mouse 1 \| lifts 1/.test(st) && /Samples: \d{2,}/.test(st), st.split('\n').slice(0, 2));
+  }
 
   check('no page errors', errors.length === 0, errors);
 

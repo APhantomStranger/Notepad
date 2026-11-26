@@ -1,9 +1,13 @@
 <!DOCTYPE html>
 <!--
   Notes — a minimal tabbed notepad. Installable web app (PWA).
-  Version 2.1.0
+  Version 2.2.0
 
   Changelog
+  2.2.0  Drawing: eraser (removes any line it touches; also the stylus's
+         eraser end) and undo. Steadier ink: constant line width, a stylus
+         that briefly loses contact keeps the same line, a resting hand
+         no longer cancels a line, palms ignored, low-latency canvas.
   2.1.0  Drawing sheets: pen button opens a blank page to hand-write on.
          Super fine / regular / wide pens, invert (white ink on black),
          endless page that grows as you scroll and write. Ink saves the
@@ -104,6 +108,7 @@
     display: grid; place-items: center; color: #333; cursor: pointer; padding: 0;
   }
   .dbar button.on { background: #dcedc8; color: var(--bar-dark); }
+  .dbar button:disabled { opacity: .3; cursor: default; }
   .dbar button svg { width: 24px; height: 24px; fill: currentColor; }
   .dbar .dot { display: block; border-radius: 50%; background: currentColor; }
   .dbar .sep { width: 1px; height: 28px; background: #ddd; margin: 0 4px; }
@@ -200,7 +205,7 @@
 
 <script>
 'use strict';
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 
 /* ============================================================
    Storage — localStorage, written synchronously on every edit,
@@ -370,6 +375,10 @@ const INVERTED = {                        // per theme: what "invert" swaps to
 const drawings = {};                      // id -> Drawing
 let penSeen = load('notes.penSeen') === '1';
 let seqCounter = 0;
+let tool = 'pen';                         // 'pen' or 'eraser'
+function commitAllDrawings() { Object.keys(drawings).forEach(function (id) { drawings[id].commitPending(); }); }
+document.addEventListener('visibilitychange', function () { if (document.hidden) commitAllDrawings(); });
+window.addEventListener('pagehide', commitAllDrawings);
 
 function isDrawing(id) { return meta.types[id] === 'draw'; }
 
@@ -461,8 +470,11 @@ function Drawing(id) {
   this.strokes = [];       // saved strokes, oldest first
   this.bottom = 0;         // lowest ink on the page
   this.scrollY = 0;
-  this.cur = null;         // stroke being drawn
-  this.penId = null;       // pointer drawing it
+  this.cur = null;         // line being drawn
+  this.active = null;      // the pointer gesture in progress (draw or erase)
+  this.pending = null;     // line just lifted, held briefly in case the contact blipped
+  this.eraser = null;      // eraser position while erasing
+  this.history = [];       // for undo: {add:[strokes]} or {erase:[strokes]}
   this.touches = new Map(); // scrolling fingers: pointerId -> {y, t}
   this.ignore = new Set();  // palm/finger pointers to ignore until they lift
   this.vel = 0; this.flingRaf = 0; this.raf = 0; this.sbarTimer = 0;
@@ -472,7 +484,7 @@ function Drawing(id) {
   this.el.dataset.id = id;
   this.canvas = document.createElement('canvas');
   this.canvas.setAttribute('aria-label', 'Drawing');
-  this.ctx = this.canvas.getContext('2d');
+  this.ctx = this.canvas.getContext('2d', { desynchronized: true }) || this.canvas.getContext('2d');   // low-latency ink
   this.sbar = el('div', 'sbar');
   this.bar = el('div', 'dbar');
   PENS.forEach(function (pn) {
@@ -481,9 +493,20 @@ function Drawing(id) {
     const dot = el('span', 'dot');
     dot.style.width = dot.style.height = pn.dot + 'px';
     b.appendChild(dot);
-    b.addEventListener('click', function () { meta.pen = pn.id; saveMeta(); self.syncBar(); });
+    b.addEventListener('click', function () { meta.pen = pn.id; tool = 'pen'; saveMeta(); self.syncBar(); });
     self.bar.appendChild(b);
   });
+  const er = el('button');
+  er.dataset.eraser = '1'; er.title = 'Eraser'; er.setAttribute('aria-label', 'Eraser');
+  er.innerHTML = '<svg viewBox="0 0 24 24"><path d="M15.14 3c-.51 0-1.02.2-1.41.59L2.59 14.73c-.78.77-.78 2.04 0 2.83L5.03 20h7.66l8.72-8.73c.79-.77.79-2.03 0-2.83l-4.85-4.85C16.17 3.2 15.65 3 15.14 3zM6.86 18l-2.86-2.86 4.73-4.73 4.86 4.86L11.86 18H6.86zM17 18l-2 2h7v-2h-5z"/></svg>';
+  er.addEventListener('click', function () { tool = tool === 'eraser' ? 'pen' : 'eraser'; self.syncBar(); });
+  this.bar.appendChild(el('span', 'sep'));
+  this.bar.appendChild(er);
+  const un = el('button');
+  un.dataset.undo = '1'; un.title = 'Undo'; un.setAttribute('aria-label', 'Undo');
+  un.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>';
+  un.addEventListener('click', function () { self.undo(); });
+  this.bar.appendChild(un);
   this.bar.appendChild(el('span', 'sep'));
   const inv = el('button');
   inv.dataset.invert = '1'; inv.title = 'Invert colors'; inv.setAttribute('aria-label', 'Invert colors');
@@ -531,6 +554,7 @@ Drawing.prototype.load = function () {
 
 Drawing.prototype.wipe = function () {
   const id = this.id;
+  if (this.pending) { clearTimeout(this.pending.timer); this.pending = null; }
   strokesTx('readwrite', function (st) { st.delete(sheetRange(id)); }).catch(function () {});
 };
 
@@ -553,7 +577,7 @@ Drawing.prototype.resize = function () {
 /* The page never runs out: you can always scroll two screens past the lowest ink,
    and writing down there pushes the end further. */
 Drawing.prototype.maxScroll = function () {
-  const b = Math.max(this.bottom, this.cur ? this.cur.maxY : 0);
+  const b = Math.max(this.bottom, this.cur ? this.cur.maxY : 0, this.pending ? this.pending.s.maxY : 0);
   return Math.max(0, b) + 2 * this.h;
 };
 
@@ -590,7 +614,13 @@ Drawing.prototype.render = function () {
     const s = this.strokes[i];
     if (s.maxY >= top && s.minY <= bot) drawPieces(c, s.pts, s.pts.length / 3, 1, Infinity, true);
   }
+  if (this.pending) drawPieces(c, this.pending.s.pts, this.pending.s.pts.length / 3, 1, Infinity, true);
   if (this.cur) drawPieces(c, this.cur.pts, this.cur.pts.length / 3, 1, Infinity, false);
+  if (this.eraser) {
+    c.globalAlpha = 0.45; c.lineWidth = 1.5;
+    c.beginPath(); c.arc(this.eraser.x, this.eraser.y, ERASER_PX, 0, 2 * Math.PI); c.stroke();
+    c.globalAlpha = 1;
+  }
   const max = this.maxScroll(), bh = Math.max(28, this.h * this.h / (max + this.h));
   this.sbar.style.height = bh + 'px';
   this.sbar.style.top = ((this.h - bh) * (max ? this.scrollY / max : 0)) + 'px';
@@ -606,9 +636,14 @@ Drawing.prototype.flashBar = function () {
 Drawing.prototype.syncBar = function () {
   const inv = !!meta.inv[this.id];
   this.bar.querySelectorAll('button[data-pen]').forEach(function (b) {
-    b.classList.toggle('on', b.dataset.pen === meta.pen);
-    b.setAttribute('aria-pressed', b.dataset.pen === meta.pen ? 'true' : 'false');
+    const on = tool === 'pen' && b.dataset.pen === meta.pen;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+  const eb = this.bar.querySelector('button[data-eraser]');
+  eb.classList.toggle('on', tool === 'eraser');
+  eb.setAttribute('aria-pressed', tool === 'eraser' ? 'true' : 'false');
+  this.bar.querySelector('button[data-undo]').disabled = !this.history.length && !this.pending;
   const ib = this.bar.querySelector('button[data-invert]');
   ib.classList.toggle('on', inv);
   ib.setAttribute('aria-pressed', inv ? 'true' : 'false');
@@ -621,40 +656,103 @@ Drawing.prototype.toggleInvert = function () {
   this.render();
 };
 
-/* ---- input ---- */
+/* ---- input ----
+   Built to keep lines continuous on real tablets:
+   - constant line width (stylus pressure on many tablets is jumpy -> blotchy ink)
+   - a stylus that loses contact for a moment carries on the SAME line (stitching)
+   - extra touches never cancel a line once it has started (resting hand)
+   - wide contacts (a palm) are ignored
+   - every sample the screen reports is used (coalesced events), on a low-latency canvas */
+const STITCH_MS = 80;       // contact dropped for less than this...
+const STITCH_PX = 28;       // ...and back down this close: same line
+const PALM_PX = 50;         // touch contact wider than this (css px) = palm
+const TWO_FINGER_MS = 200;  // second finger this soon after the first = two-finger scroll
+const ERASER_PX = 12;       // eraser reach around the tip
+
+Drawing.prototype.toPage = function (e) {
+  return { x: e.clientX - this.rect.left, y: e.clientY - this.rect.top + this.scrollY };
+};
+
 Drawing.prototype.down = function (e) {
   if (e.pointerType === 'pen' && !penSeen) { penSeen = true; store('notes.penSeen', '1'); }
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   e.preventDefault();
   this.stopFling();
   try { this.canvas.setPointerCapture(e.pointerId); } catch (x) {}
+  const a = this.active;
   if (e.pointerType === 'touch') {
-    if (this.cur && this.curType !== 'touch') { this.ignore.add(e.pointerId); return; }   // palm while the pen writes
-    this.touches.set(e.pointerId, { y: e.clientY, t: e.timeStamp });
-    if (penSeen || this.touches.size > 1) {
-      if (this.cur) this.cancelStroke();     // that first finger was starting a scroll, not a line
+    if (Math.max(e.width || 0, e.height || 0) > PALM_PX) { this.ignore.add(e.pointerId); return; }   // palm
+    if (a) {
+      if (a.type === 'touch' && e.timeStamp - a.start < TWO_FINGER_MS && a.travel < 12) {
+        // two fingers landed together: that's a scroll, not a line
+        this.abortGesture();
+        this.touches.set(a.id, { y: a.lastY, t: e.timeStamp });
+        this.touches.set(e.pointerId, { y: e.clientY, t: e.timeStamp });
+      } else this.ignore.add(e.pointerId);                // hand resting while writing: ignore it
       return;
     }
-  } else if (this.touches.size) {            // pen lands while a hand rests on the glass: the pen wins
+    if (this.touches.size || penSeen) {                   // fingers scroll (always, once a stylus does the writing)
+      this.touches.set(e.pointerId, { y: e.clientY, t: e.timeStamp });
+      return;
+    }
+  } else if (this.touches.size) {                         // stylus lands while fingers rest: the stylus wins
     const ign = this.ignore;
     this.touches.forEach(function (v, k) { ign.add(k); });
     this.touches.clear();
   }
-  if (this.cur) return;
+  if (a) return;
   this.begin(e);
+};
+
+Drawing.prototype.begin = function (e) {
+  this.rect = this.canvas.getBoundingClientRect();
+  const erase = tool === 'eraser' || e.button === 5 || (e.buttons & 32) === 32;   // eraser tool, or the pen's eraser end
+  this.active = { kind: erase ? 'erase' : 'draw', id: e.pointerId, type: e.pointerType,
+                  start: e.timeStamp, travel: 0, lastX: e.clientX, lastY: e.clientY, removed: [] };
+  if (erase) {
+    this.commitPending();
+    this.eraser = this.toPage(e);
+    this.eraseAt(this.eraser.x, this.eraser.y);
+    return;
+  }
+  const at = this.toPage(e), pd = this.pending;
+  if (pd && e.timeStamp - pd.t <= STITCH_MS) {
+    const p = pd.s.pts, n = p.length;
+    if (Math.hypot(at.x - p[n - 3], at.y - p[n - 2]) <= STITCH_PX) {
+      clearTimeout(pd.timer);                              // contact blipped: keep the same line going
+      this.pending = null;
+      this.cur = pd.s;
+      this.addPoint(e);
+      this.drawLive();
+      return;
+    }
+  }
+  this.commitPending();
+  const pen = PENS.find(function (pn) { return pn.id === meta.pen; }) || PENS[1];
+  this.cur = { sheet: this.id, seq: Date.now() * 1000 + (seqCounter++ % 1000), size: pen.px, pts: [],
+               minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  this.drawn = 0;                                          // curve pieces already painted
+  this.addPoint(e);
 };
 
 Drawing.prototype.move = function (e) {
   if (this.ignore.has(e.pointerId)) return;
-  if (this.cur && e.pointerId === this.penId) {
+  const a = this.active;
+  if (a && e.pointerId === a.id) {
     const list = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
     const evs = list.length ? list : [e];
-    for (let i = 0; i < evs.length; i++) this.addPoint(evs[i]);
-    this.drawLive();
+    for (let i = 0; i < evs.length; i++) {
+      const ev = evs[i];
+      a.travel += Math.hypot(ev.clientX - a.lastX, ev.clientY - a.lastY);
+      a.lastX = ev.clientX; a.lastY = ev.clientY;
+      if (a.kind === 'erase') this.eraseTo(this.toPage(ev));
+      else this.addPoint(ev);
+    }
+    if (a.kind === 'draw') this.drawLive(); else this.schedule();
     return;
   }
   const t = this.touches.get(e.pointerId);
-  if (!t || this.cur) return;
+  if (!t || a) return;
   const dy = e.clientY - t.y, dt = Math.max(1, e.timeStamp - t.t);
   t.y = e.clientY; t.t = e.timeStamp;
   const step = -dy / this.touches.size;
@@ -664,34 +762,22 @@ Drawing.prototype.move = function (e) {
 
 Drawing.prototype.up = function (e) {
   if (this.ignore.delete(e.pointerId)) return;
-  if (this.cur && e.pointerId === this.penId) {
-    if (e.type === 'pointerup') this.move(e);   // keep the very last sample
-    this.finishStroke();
+  const a = this.active;
+  if (a && e.pointerId === a.id) {
+    if (e.type === 'pointerup') this.move(e);            // keep the very last sample
+    if (a.kind === 'erase') this.finishErase(); else this.liftPen(e);
   }
-  if (this.touches.delete(e.pointerId) && !this.touches.size && !this.cur) this.fling();
-};
-
-Drawing.prototype.begin = function (e) {
-  const pen = PENS.find(function (pn) { return pn.id === meta.pen; }) || PENS[1];
-  this.rect = this.canvas.getBoundingClientRect();
-  this.penId = e.pointerId;
-  this.curType = e.pointerType;
-  this.cur = { sheet: this.id, seq: Date.now() * 1000 + (seqCounter++ % 1000), size: pen.px, pts: [],
-               minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
-  this.drawn = 0;                            // curve pieces already painted
-  this.addPoint(e);
+  if (this.touches.delete(e.pointerId) && !this.touches.size && !this.active) this.fling();
 };
 
 Drawing.prototype.addPoint = function (ev) {
   const s = this.cur, p = s.pts, n = p.length;
-  const x = ev.clientX - this.rect.left, y = ev.clientY - this.rect.top + this.scrollY;
+  const at = this.toPage(ev), x = at.x, y = at.y;
   if (n) {
     const dx = x - p[n - 3], dy = y - p[n - 2];
-    if (dx * dx + dy * dy < 0.5) return;
+    if (dx * dx + dy * dy < 0.25) return;
   }
-  let w = s.size;
-  if (this.curType === 'pen' && ev.pressure > 0) w = s.size * (0.55 + 0.9 * ev.pressure);
-  w = Math.round(w * 4) / 4;
+  const w = s.size;                                        // constant width: smooth, even lines
   p.push(Math.round(x * 10) / 10, Math.round(y * 10) / 10, w);
   const r = w / 2;
   if (x - r < s.minX) s.minX = x - r;
@@ -708,23 +794,122 @@ Drawing.prototype.drawLive = function () {
   this.drawn = to;
 };
 
-Drawing.prototype.finishStroke = function () {
-  const s = this.cur;
-  this.cur = null; this.penId = null;
+/* Pen up: paint the line's end, then hold it for a moment in case the
+   contact only blipped. It's saved when that moment passes (or sooner,
+   if anything else happens first). */
+Drawing.prototype.liftPen = function (e) {
+  const s = this.cur, self = this;
+  this.active = null;
+  this.cur = null;
   this.prep(inkColors(this.id).ink);
   drawPieces(this.ctx, s.pts, s.pts.length / 3, this.drawn + 1, Infinity, true);
-  s.pts = new Float32Array(s.pts);
-  this.strokes.push(s);
-  this.bottom = Math.max(this.bottom, s.maxY);
-  this.el.dataset.strokes = String(this.strokes.length);
-  this.render();
-  strokesTx('readwrite', function (st) { st.put({ sheet: s.sheet, seq: s.seq, size: s.size, pts: s.pts }); })
-    .catch(function () { toast('Couldn’t save that stroke — your phone’s storage may be full.'); });
+  this.drawn = Math.max(0, s.pts.length / 3 - 2);
+  this.pending = { s: s, t: e.timeStamp, timer: setTimeout(function () { self.commitPending(); }, STITCH_MS + 20) };
+  this.syncBar();
 };
 
-Drawing.prototype.cancelStroke = function () {
-  this.cur = null; this.penId = null;
+Drawing.prototype.commitPending = function () {
+  const pd = this.pending;
+  if (!pd) return;
+  clearTimeout(pd.timer);
+  this.pending = null;
+  const s = pd.s;
+  s.pts = new Float32Array(s.pts);
+  this.strokes.push(s);
+  this.history.push({ add: [s] });
+  this.changed();
   this.render();
+  this.saveStrokes([s]);
+};
+
+Drawing.prototype.abortGesture = function () {
+  const a = this.active;
+  this.active = null;
+  if (a && a.kind === 'erase' && a.removed.length) {
+    this.strokes = this.strokes.concat(a.removed).sort(function (x, y) { return x.seq - y.seq; });
+    this.changed();
+  }
+  this.cur = null;
+  this.eraser = null;
+  this.render();
+};
+
+/* ---- eraser: removes any line it touches ---- */
+function nearStroke(s, x, y, r) {
+  const p = s.pts, n = p.length / 3;
+  if (n === 1) return Math.hypot(x - p[0], y - p[1]) <= r + p[2] / 2;
+  for (let i = 0; i < n - 1; i++) {
+    const ax = p[i * 3], ay = p[i * 3 + 1], bx = p[i * 3 + 3], by = p[i * 3 + 4];
+    const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+    let t = len ? ((x - ax) * dx + (y - ay) * dy) / len : 0;
+    t = Math.max(0, Math.min(1, t));
+    if (Math.hypot(x - (ax + t * dx), y - (ay + t * dy)) <= r + p[i * 3 + 5] / 2) return true;
+  }
+  return false;
+}
+
+Drawing.prototype.eraseAt = function (x, y) {
+  const R = ERASER_PX;
+  for (let i = this.strokes.length - 1; i >= 0; i--) {
+    const s = this.strokes[i];
+    if (x < s.minX - R || x > s.maxX + R || y < s.minY - R || y > s.maxY + R) continue;
+    if (nearStroke(s, x, y, R)) { this.active.removed.push(s); this.strokes.splice(i, 1); }
+  }
+};
+
+Drawing.prototype.eraseTo = function (to) {            // sweep from the last spot, so fast moves don't skip lines
+  const from = this.eraser, d = Math.hypot(to.x - from.x, to.y - from.y);
+  const steps = Math.max(1, Math.ceil(d / (ERASER_PX * 0.75)));
+  for (let i = 1; i <= steps; i++) this.eraseAt(from.x + (to.x - from.x) * i / steps, from.y + (to.y - from.y) * i / steps);
+  this.eraser = to;
+};
+
+Drawing.prototype.finishErase = function () {
+  const removed = this.active.removed;
+  this.active = null;
+  this.eraser = null;
+  if (removed.length) {
+    this.history.push({ erase: removed });
+    this.changed();
+    this.dropStrokes(removed);
+  }
+  this.render();
+};
+
+/* ---- undo: takes back the last line drawn or the last erase ---- */
+Drawing.prototype.undo = function () {
+  if (this.active) return;
+  this.commitPending();
+  const h = this.history.pop();
+  if (!h) return;
+  if (h.add) {
+    const gone = h.add.map(function (s) { return s.seq; });
+    this.strokes = this.strokes.filter(function (s) { return gone.indexOf(s.seq) === -1; });
+    this.dropStrokes(h.add);
+  } else if (h.erase) {
+    this.strokes = this.strokes.concat(h.erase).sort(function (x, y) { return x.seq - y.seq; });
+    this.saveStrokes(h.erase);
+  }
+  this.changed();
+  this.render();
+};
+
+Drawing.prototype.changed = function () {
+  this.bottom = this.strokes.reduce(function (m, s) { return Math.max(m, s.maxY); }, 0);
+  this.el.dataset.strokes = String(this.strokes.length);
+  this.syncBar();
+};
+
+Drawing.prototype.saveStrokes = function (list) {
+  strokesTx('readwrite', function (st) {
+    list.forEach(function (s) { st.put({ sheet: s.sheet, seq: s.seq, size: s.size, pts: s.pts }); });
+  }).catch(function () { toast('Couldn’t save that — your phone’s storage may be full.'); });
+};
+
+Drawing.prototype.dropStrokes = function (list) {
+  strokesTx('readwrite', function (st) {
+    list.forEach(function (s) { st.delete([s.sheet, s.seq]); });
+  }).catch(function () {});
 };
 
 Drawing.prototype.fling = function () {
